@@ -1,3 +1,4 @@
+use crate::config::ToolOutputRelevancePruningConfig;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
@@ -25,6 +26,9 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 use codex_utils_output_truncation::truncate_text;
+use serde_json::Value as JsonValue;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::LazyLock;
@@ -56,6 +60,120 @@ pub(crate) struct TotalTokenUsageBreakdown {
     pub all_history_items_model_visible_bytes: i64,
     pub estimated_tokens_of_items_added_since_last_successful_api_response: i64,
     pub estimated_bytes_of_items_added_since_last_successful_api_response: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RelevancePruningHint {
+    pub(crate) call_id: Option<String>,
+    pub(crate) output_ref: Option<String>,
+    pub(crate) replacement_text: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RelevancePruningStats {
+    pub(crate) matched_hints: usize,
+    pub(crate) rewritten_outputs: usize,
+    pub(crate) skipped_hints: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RelevancePruningPlanStats {
+    pub(crate) candidate_outputs: usize,
+    pub(crate) original_token_estimate: usize,
+    pub(crate) replacement_token_estimate: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RelevancePruningPlan {
+    pub(crate) hints: Vec<RelevancePruningHint>,
+    pub(crate) stats: RelevancePruningPlanStats,
+}
+
+impl RelevancePruningPlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hints.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RelevancePruningFeedback {
+    drop_call_ids: HashSet<String>,
+    keep_call_ids: HashSet<String>,
+    drop_command_fragments: Vec<String>,
+    keep_command_fragments: Vec<String>,
+}
+
+impl RelevancePruningFeedback {
+    pub(crate) fn from_tool_args(
+        drop_call_ids: impl IntoIterator<Item = String>,
+        keep_call_ids: impl IntoIterator<Item = String>,
+        drop_commands: impl IntoIterator<Item = String>,
+        keep_commands: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            drop_call_ids: sanitize_feedback_values(drop_call_ids)
+                .into_iter()
+                .collect(),
+            keep_call_ids: sanitize_feedback_values(keep_call_ids)
+                .into_iter()
+                .collect(),
+            drop_command_fragments: sanitize_feedback_values(drop_commands),
+            keep_command_fragments: sanitize_feedback_values(keep_commands),
+        }
+    }
+
+    fn should_drop(
+        &self,
+        call_id: &str,
+        visible_output_id: Option<&str>,
+        metadata: Option<&ToolCallMetadata>,
+    ) -> bool {
+        if self.selector_matches(&self.keep_call_ids, call_id, visible_output_id)
+            || self.command_matches(metadata, true)
+        {
+            return false;
+        }
+        if self.has_keep_selectors() && !self.has_drop_selectors() {
+            return true;
+        }
+        self.selector_matches(&self.drop_call_ids, call_id, visible_output_id)
+            || self.command_matches(metadata, false)
+    }
+
+    fn has_drop_selectors(&self) -> bool {
+        !self.drop_call_ids.is_empty() || !self.drop_command_fragments.is_empty()
+    }
+
+    fn has_keep_selectors(&self) -> bool {
+        !self.keep_call_ids.is_empty() || !self.keep_command_fragments.is_empty()
+    }
+
+    fn selector_matches(
+        &self,
+        selectors: &HashSet<String>,
+        call_id: &str,
+        visible_output_id: Option<&str>,
+    ) -> bool {
+        selectors.contains(call_id)
+            || visible_output_id.is_some_and(|visible_id| selectors.contains(visible_id))
+    }
+
+    fn command_matches(&self, metadata: Option<&ToolCallMetadata>, keep: bool) -> bool {
+        let Some(command) = metadata.and_then(|metadata| metadata.command.as_deref()) else {
+            return false;
+        };
+        let fragments = if keep {
+            &self.keep_command_fragments
+        } else {
+            &self.drop_command_fragments
+        };
+        fragments.iter().any(|fragment| {
+            let fragment = fragment.trim();
+            fragment.len() >= 6 && (command.contains(fragment) || fragment.contains(command))
+        })
+    }
 }
 
 impl ContextManager {
@@ -182,6 +300,45 @@ impl ContextManager {
     pub(crate) fn replace(&mut self, items: Vec<ResponseItem>) {
         self.items = items;
         self.history_version = self.history_version.saturating_add(1);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn apply_relevance_pruning_hints(
+        &mut self,
+        hints: &[RelevancePruningHint],
+    ) -> RelevancePruningStats {
+        let mut matched_hints = 0usize;
+        let mut rewritten_outputs = 0usize;
+        let mut changed = false;
+
+        for hint in hints {
+            if !hint.has_selector() || hint.replacement_text.trim().is_empty() {
+                continue;
+            }
+
+            let mut hint_matched = false;
+            for item in &mut self.items {
+                if rewrite_prunable_tool_output(item, hint) {
+                    hint_matched = true;
+                    rewritten_outputs = rewritten_outputs.saturating_add(1);
+                    changed = true;
+                }
+            }
+
+            if hint_matched {
+                matched_hints = matched_hints.saturating_add(1);
+            }
+        }
+
+        if changed {
+            self.history_version = self.history_version.saturating_add(1);
+        }
+
+        RelevancePruningStats {
+            matched_hints,
+            rewritten_outputs,
+            skipped_hints: hints.len().saturating_sub(matched_hints),
+        }
     }
 
     /// Replace image content in the last turn if it originated from a tool output.
@@ -451,6 +608,327 @@ impl ContextManager {
         }
         cut_idx
     }
+}
+
+pub(crate) fn build_relevance_pruning_plan_for_feedback(
+    prompt_items: &[ResponseItem],
+    config: &ToolOutputRelevancePruningConfig,
+    feedback: &RelevancePruningFeedback,
+) -> RelevancePruningPlan {
+    if !config.enabled {
+        return RelevancePruningPlan::default();
+    }
+
+    let call_tools = tool_metadata_by_call_id(prompt_items);
+    let mut hints = Vec::new();
+    let mut original_token_estimate = 0usize;
+    let mut replacement_token_estimate = 0usize;
+
+    for item in prompt_items {
+        let (call_id, output) = match item {
+            ResponseItem::FunctionCallOutput { call_id, output }
+            | ResponseItem::CustomToolCallOutput {
+                call_id, output, ..
+            } => (call_id, output),
+            _ => continue,
+        };
+        let Some(text) = output.text_content() else {
+            continue;
+        };
+        let tool_metadata = call_tools.get(call_id);
+        let Some(tool_name) = tool_metadata
+            .map(|metadata| metadata.name.as_str())
+            .or_else(|| infer_prunable_tool_name(text))
+        else {
+            continue;
+        };
+        if !config.applies_to(tool_name) {
+            continue;
+        }
+        let visible_output_id = extract_chunk_id(text);
+        let explicit_drop =
+            feedback.should_drop(call_id, visible_output_id.as_deref(), tool_metadata);
+        if !explicit_drop {
+            continue;
+        }
+        if text.contains("Pruned tool output:") {
+            continue;
+        }
+        let packet_tokens = approx_token_count(text);
+        let output_ref = extract_output_ref(text);
+        let replacement_text = build_tool_feedback_pruned_tool_output(
+            tool_name,
+            call_id,
+            tool_metadata,
+            output_ref.as_deref(),
+            config.target_tokens,
+        );
+        let replacement_tokens = approx_token_count(&replacement_text);
+        if replacement_tokens >= packet_tokens {
+            continue;
+        }
+        original_token_estimate = original_token_estimate.saturating_add(packet_tokens);
+        replacement_token_estimate = replacement_token_estimate.saturating_add(replacement_tokens);
+        hints.push(RelevancePruningHint {
+            call_id: Some(call_id.clone()),
+            output_ref,
+            replacement_text,
+        });
+    }
+
+    RelevancePruningPlan {
+        stats: RelevancePruningPlanStats {
+            candidate_outputs: hints.len(),
+            original_token_estimate,
+            replacement_token_estimate,
+        },
+        hints,
+    }
+}
+
+#[allow(dead_code)]
+impl RelevancePruningHint {
+    fn has_selector(&self) -> bool {
+        self.call_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            || self
+                .output_ref
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolCallMetadata {
+    name: String,
+    command: Option<String>,
+    cwd: Option<String>,
+}
+
+fn tool_metadata_by_call_id(items: &[ResponseItem]) -> HashMap<String, ToolCallMetadata> {
+    let mut metadata = HashMap::new();
+    for item in items {
+        match item {
+            ResponseItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
+                let (command, cwd) = parse_tool_call_command_and_cwd(arguments);
+                metadata.insert(
+                    call_id.clone(),
+                    ToolCallMetadata {
+                        name: name.clone(),
+                        command,
+                        cwd,
+                    },
+                );
+            }
+            ResponseItem::CustomToolCall {
+                call_id,
+                name,
+                input,
+                ..
+            } => {
+                let (command, cwd) = parse_tool_call_command_and_cwd(input);
+                metadata.insert(
+                    call_id.clone(),
+                    ToolCallMetadata {
+                        name: name.clone(),
+                        command,
+                        cwd,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    metadata
+}
+
+fn infer_prunable_tool_name(text: &str) -> Option<&'static str> {
+    if text.contains("output_ref:") && text.contains("command:") {
+        Some("exec_command")
+    } else if is_raw_exec_output(text) {
+        Some("exec_command")
+    } else {
+        None
+    }
+}
+
+fn parse_tool_call_command_and_cwd(arguments: &str) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<JsonValue>(arguments) else {
+        return (None, None);
+    };
+    let command = value
+        .get("cmd")
+        .or_else(|| value.get("command"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let cwd = value
+        .get("workdir")
+        .or_else(|| value.get("cwd"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    (command, cwd)
+}
+
+fn sanitize_feedback_values(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let value = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string();
+            (!value.is_empty() && value != "-" && value != "none").then_some(value)
+        })
+        .take(16)
+        .collect()
+}
+
+fn extract_output_ref(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("output_ref:")?.trim();
+        let output_ref = value.split_whitespace().next()?.trim();
+        (!output_ref.is_empty()).then(|| output_ref.to_string())
+    })
+}
+
+fn extract_chunk_id(text: &str) -> Option<String> {
+    text.lines().take(12).find_map(|line| {
+        let value = line.trim().strip_prefix("Chunk ID:")?.trim();
+        let chunk_id = value.split_whitespace().next()?.trim();
+        (!chunk_id.is_empty()).then(|| chunk_id.to_string())
+    })
+}
+
+fn is_raw_exec_output(text: &str) -> bool {
+    let mut has_wall_time = false;
+    let mut has_output = false;
+    for line in text.lines().take(12) {
+        let trimmed = line.trim_start();
+        has_wall_time |= trimmed.starts_with("Wall time:");
+        has_output |= trimmed == "Output:";
+    }
+    has_wall_time && has_output
+}
+
+fn build_tool_feedback_pruned_tool_output(
+    tool_name: &str,
+    call_id: &str,
+    tool_metadata: Option<&ToolCallMetadata>,
+    output_ref: Option<&str>,
+    target_tokens: usize,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(
+        "Pruned tool output: trim_prompt_context marked this consumed output as not needed for later analysis."
+            .to_string(),
+    );
+    lines.push(format!("tool_name: {tool_name}"));
+    lines.push(format!("call_id: {call_id}"));
+    if let Some(output_ref) = output_ref {
+        lines.push(format!(
+            "output_ref: {}",
+            truncate_pruned_line(output_ref, 240)
+        ));
+    }
+    if let Some(command) = tool_metadata.and_then(|metadata| metadata.command.as_deref()) {
+        lines.push(format!("command: {}", truncate_pruned_line(command, 240)));
+    }
+    if let Some(cwd) = tool_metadata.and_then(|metadata| metadata.cwd.as_deref()) {
+        lines.push(format!("cwd: {}", truncate_pruned_line(cwd, 240)));
+    }
+    lines.push("drop_source: trim_prompt_context".to_string());
+    lines.push(
+        "pruning_policy: previous model pass consumed the full output and did not retain it for later context, or explicitly marked it disposable; rerun a targeted command if needed."
+            .to_string(),
+    );
+
+    fit_pruned_lines_to_token_budget(lines, target_tokens.clamp(50, 100))
+}
+
+fn fit_pruned_lines_to_token_budget(mut lines: Vec<String>, target_tokens: usize) -> String {
+    let min_lines = 4usize.min(lines.len());
+    while lines.len() > min_lines && approx_token_count(&lines.join("\n")) > target_tokens {
+        let remove_at = lines
+            .iter()
+            .rposition(|line| {
+                line.starts_with("- ")
+                    || line.starts_with("cwd:")
+                    || line.starts_with("source_coverage:")
+            })
+            .unwrap_or(lines.len() - 1);
+        lines.remove(remove_at);
+    }
+
+    let text = lines.join("\n");
+    if approx_token_count(&text) <= target_tokens {
+        return text;
+    }
+    truncate_text(&text, TruncationPolicy::Tokens(target_tokens))
+}
+
+fn truncate_pruned_line(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars {
+        return line.to_string();
+    }
+    let mut truncated = line
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+#[allow(dead_code)]
+fn rewrite_prunable_tool_output(item: &mut ResponseItem, hint: &RelevancePruningHint) -> bool {
+    match item {
+        ResponseItem::FunctionCallOutput { call_id, output }
+        | ResponseItem::CustomToolCallOutput {
+            call_id, output, ..
+        } => rewrite_matching_tool_output(call_id, output, hint),
+        _ => false,
+    }
+}
+
+#[allow(dead_code)]
+fn rewrite_matching_tool_output(
+    call_id: &str,
+    output: &mut FunctionCallOutputPayload,
+    hint: &RelevancePruningHint,
+) -> bool {
+    let Some(text) = output.text_content_mut() else {
+        return false;
+    };
+
+    if let Some(expected_call_id) = hint.call_id.as_deref()
+        && expected_call_id != call_id
+        && extract_chunk_id(text).as_deref() != Some(expected_call_id)
+    {
+        return false;
+    }
+
+    if let Some(output_ref) = hint.output_ref.as_deref()
+        && !text.contains(output_ref)
+    {
+        return false;
+    }
+
+    if *text == hint.replacement_text {
+        return false;
+    }
+    *text = hint.replacement_text.clone();
+    true
 }
 
 pub(crate) fn truncate_function_output_payload(

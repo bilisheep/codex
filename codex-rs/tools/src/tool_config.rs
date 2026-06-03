@@ -127,6 +127,7 @@ pub struct ToolsConfig {
     pub agent_jobs_tools: bool,
     pub agent_jobs_worker_tools: bool,
     pub agent_type_description: String,
+    pub tool_output_relevance_pruning_enabled: bool,
 }
 
 pub struct ToolsConfigParams<'a> {
@@ -264,6 +265,7 @@ impl ToolsConfig {
             agent_jobs_tools: include_agent_jobs,
             agent_jobs_worker_tools,
             agent_type_description: String::new(),
+            tool_output_relevance_pruning_enabled: false,
         }
     }
 
@@ -370,10 +372,16 @@ impl ToolsConfig {
         self
     }
 
+    pub fn with_tool_output_relevance_pruning_enabled(mut self, enabled: bool) -> Self {
+        self.tool_output_relevance_pruning_enabled = enabled;
+        self
+    }
+
     pub fn for_code_mode_nested_tools(&self) -> Self {
         let mut nested = self.clone();
         nested.code_mode_enabled = false;
         nested.code_mode_only_enabled = false;
+        nested.tool_output_relevance_pruning_enabled = false;
         nested
     }
 }

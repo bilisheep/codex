@@ -2439,6 +2439,39 @@
         }
       ]
     },
+    "ToolOutputRelevancePruningToml": {
+      "additionalProperties": false,
+      "properties": {
+        "apply_to": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "target_tokens": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threshold_tokens": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ToolSuggestConfig": {
       "additionalProperties": false,
       "properties": {
@@ -4666,6 +4699,14 @@
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "tool_output_relevance_pruning": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolOutputRelevancePruningToml"
+        }
+      ],
+      "description": "Optional pruning of already-consumed compressed tool outputs before later model requests."
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",

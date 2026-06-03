@@ -218,6 +218,7 @@ impl TurnContext {
         .with_spawn_agent_usage_hint_text(config.multi_agent_v2.usage_hint_text.clone())
         .with_hide_spawn_agent_metadata(config.multi_agent_v2.hide_spawn_agent_metadata)
         .with_goal_tools_allowed(self.tools_config.goal_tools)
+        .with_tool_output_relevance_pruning_enabled(config.tool_output_relevance_pruning.enabled)
         .with_max_concurrent_threads_per_session(
             config
                 .features
@@ -499,6 +500,9 @@ impl Session {
         .with_spawn_agent_usage_hint_text(per_turn_config.multi_agent_v2.usage_hint_text.clone())
         .with_hide_spawn_agent_metadata(per_turn_config.multi_agent_v2.hide_spawn_agent_metadata)
         .with_goal_tools_allowed(goal_tools_supported)
+        .with_tool_output_relevance_pruning_enabled(
+            per_turn_config.tool_output_relevance_pruning.enabled,
+        )
         .with_max_concurrent_threads_per_session(
             per_turn_config
                 .features

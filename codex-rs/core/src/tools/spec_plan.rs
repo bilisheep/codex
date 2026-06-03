@@ -22,6 +22,7 @@ use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::ShellHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandler;
+use crate::tools::handlers::TrimPromptContextHandler;
 use crate::tools::handlers::UpdateGoalHandler;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WriteStdinHandler;
@@ -341,6 +342,10 @@ fn collect_handler_tools(
     handlers.push(Arc::new(RequestUserInputHandler {
         available_modes: config.request_user_input_available_modes.clone(),
     }));
+
+    if config.tool_output_relevance_pruning_enabled {
+        handlers.push(Arc::new(TrimPromptContextHandler));
+    }
 
     if config.request_permissions_tool_enabled {
         handlers.push(Arc::new(RequestPermissionsHandler));

@@ -30,6 +30,7 @@ use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::ThreadStoreToml;
+use codex_config::config_toml::ToolOutputRelevancePruningToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
@@ -179,6 +180,10 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const MAX_MULTI_AGENT_V2_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
+pub(crate) const DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_MODEL: &str = "gpt-5.4-mini";
+pub(crate) const DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_THRESHOLD_TOKENS: usize = 200;
+pub(crate) const DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_TARGET_TOKENS: usize = 140;
+pub(crate) const DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_TIMEOUT_MS: u64 = 8000;
 const LOCAL_DEV_BUILD_VERSION: &str = "0.0.0";
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
@@ -386,6 +391,76 @@ pub enum ThreadStoreConfig {
     Local,
     /// In-memory thread store for test and debug configurations.
     InMemory { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutputRelevancePruningConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub apply_to: Vec<String>,
+    pub threshold_tokens: usize,
+    pub target_tokens: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for ToolOutputRelevancePruningConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_MODEL.to_string(),
+            apply_to: vec!["exec_command".to_string()],
+            threshold_tokens: DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_THRESHOLD_TOKENS,
+            target_tokens: DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_TARGET_TOKENS,
+            timeout_ms: DEFAULT_TOOL_OUTPUT_RELEVANCE_PRUNING_TIMEOUT_MS,
+        }
+    }
+}
+
+impl ToolOutputRelevancePruningConfig {
+    fn from_toml(config: Option<ToolOutputRelevancePruningToml>) -> Self {
+        let Some(config) = config else {
+            return Self::default();
+        };
+        let defaults = Self::default();
+        Self {
+            enabled: config.enabled.unwrap_or(defaults.enabled),
+            model: config
+                .model
+                .and_then(|model| {
+                    let trimmed = model.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .unwrap_or(defaults.model),
+            apply_to: config
+                .apply_to
+                .map(|tools| {
+                    tools
+                        .into_iter()
+                        .filter_map(|tool| {
+                            let trimmed = tool.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|tools| !tools.is_empty())
+                .unwrap_or(defaults.apply_to),
+            threshold_tokens: config.threshold_tokens.unwrap_or(defaults.threshold_tokens),
+            target_tokens: config.target_tokens.unwrap_or(defaults.target_tokens),
+            timeout_ms: config.timeout_ms.unwrap_or(defaults.timeout_ms),
+        }
+    }
+
+    pub fn applies_to(&self, tool_name: &str) -> bool {
+        self.apply_to.iter().any(|tool| tool == tool_name)
+    }
 }
 
 /// Application configuration loaded from disk and merged with overrides.
@@ -620,6 +695,9 @@ pub struct Config {
 
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
+
+    /// Optional pruning for already-consumed compressed tool outputs.
+    pub tool_output_relevance_pruning: ToolOutputRelevancePruningConfig,
 
     /// Maximum number of agent threads that can be open concurrently.
     pub agent_max_threads: Option<usize>,
@@ -2721,6 +2799,9 @@ impl Config {
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
+        let tool_output_relevance_pruning = ToolOutputRelevancePruningConfig::from_toml(
+            cfg.tool_output_relevance_pruning.clone(),
+        );
 
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
@@ -3073,6 +3154,7 @@ impl Config {
                 })
                 .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
+            tool_output_relevance_pruning,
             agent_max_threads,
             agent_max_depth,
             agent_roles,

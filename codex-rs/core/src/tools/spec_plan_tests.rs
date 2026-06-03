@@ -22,6 +22,7 @@ use crate::tools::handlers::shell_spec::create_exec_command_tool;
 use crate::tools::handlers::shell_spec::create_request_permissions_tool;
 use crate::tools::handlers::shell_spec::create_write_stdin_tool;
 use crate::tools::handlers::shell_spec::request_permissions_tool_description;
+use crate::tools::handlers::trim_prompt_context_spec::TRIM_PROMPT_CONTEXT_TOOL_NAME;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::handlers::view_image_spec::create_view_image_tool;
 use crate::tools::registry::ToolRegistry;
@@ -140,6 +141,46 @@ fn extension_tools_do_not_replace_builtin_tools() {
             .count(),
         1
     );
+}
+
+#[test]
+fn trim_prompt_context_tool_is_registered_only_when_enabled() {
+    let model_info = model_info();
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &Features::with_defaults(),
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+
+    let (default_tools, default_registry) = build_specs_with_discoverable_tools(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        /*discoverable_tools*/ None,
+        /*extension_tool_bundles*/ &[],
+        &[],
+    );
+    assert_lacks_tool_name(&default_tools, TRIM_PROMPT_CONTEXT_TOOL_NAME);
+    assert!(!default_registry.has_handler(&ToolName::plain(TRIM_PROMPT_CONTEXT_TOOL_NAME)));
+
+    let enabled_tools_config =
+        tools_config.with_tool_output_relevance_pruning_enabled(/*enabled*/ true);
+    let (enabled_tools, enabled_registry) = build_specs_with_discoverable_tools(
+        &enabled_tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        /*discoverable_tools*/ None,
+        /*extension_tool_bundles*/ &[],
+        &[],
+    );
+    assert_contains_tool_names(&enabled_tools, &[TRIM_PROMPT_CONTEXT_TOOL_NAME]);
+    assert!(enabled_registry.has_handler(&ToolName::plain(TRIM_PROMPT_CONTEXT_TOOL_NAME)));
 }
 
 #[test]

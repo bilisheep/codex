@@ -32,17 +32,12 @@ jobs:
         include:
           - name: linux-x64
             runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            archive: tar.gz
-            ext: ""
-          - name: linux-x86
-            runner: ubuntu-24.04
-            target: i686-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             archive: tar.gz
             ext: ""
           - name: linux-arm64
             runner: ubuntu-24.04
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             archive: tar.gz
             ext: ""
           - name: windows-x64
@@ -80,32 +75,33 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux cross build dependencies
-        if: ${{ runner.os == 'Linux' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu \
-            gcc-i686-linux-gnu \
-            libc6-dev-arm64-cross \
-            libc6-dev-i386 \
-            pkg-config
+      - name: Install Zig for Linux musl builds
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
 
-      - name: Configure Linux cross linker
-        if: ${{ runner.os == 'Linux' }}
+      - name: Install Linux musl build tools
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Configure musl rusty_v8 artifacts
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        uses: ./.github/actions/setup-rusty-v8-musl
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Configure Linux release environment
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
         shell: bash
         run: |
           set -euo pipefail
-          case "${{ matrix.target }}" in
-            aarch64-unknown-linux-gnu)
-              echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-              ;;
-            i686-unknown-linux-gnu)
-              echo "CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER=i686-linux-gnu-gcc" >> "$GITHUB_ENV"
-              ;;
-          esac
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
 
       - name: Build codex
         shell: bash
@@ -178,10 +174,10 @@ jobs:
             printf '%s\n' '- 工具输出压缩链路保持关闭，与本版本分离。'
             printf '%s\n\n' '- 自动构建并上传多平台 `codex` CLI 二进制产物。'
             printf '%s\n\n' '## 构建产物'
-            printf '%s\n' '- Linux：x64、x86、arm64'
+            printf '%s\n' '- Linux：x64、arm64'
             printf '%s\n' '- Windows：x64、x86、arm64'
             printf '%s\n\n' '- macOS：x64、arm64'
-            printf '%s\n\n' '说明：macOS 已不支持 32 位 x86 用户态程序，因此不提供 macOS x86 产物。'
+            printf '%s\n\n' '说明：macOS 已不支持 32 位 x86 用户态程序，因此不提供 macOS x86 产物；Linux x86 受当前依赖链和交叉构建环境限制，本版暂不发布。'
             printf '%s\n\n' '## 使用提示'
             printf '%s\n\n' '在配置中开启：'
             printf '%s\n' '```toml'

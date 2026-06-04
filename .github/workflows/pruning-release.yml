@@ -51,12 +51,12 @@ jobs:
             archive: zip
             ext: ".exe"
           - name: macos-x64
-            runner: macos-15-xlarge
+            runner: macos-13
             target: x86_64-apple-darwin
             archive: tar.gz
             ext: ""
           - name: macos-arm64
-            runner: macos-15-xlarge
+            runner: macos-14
             target: aarch64-apple-darwin
             archive: tar.gz
             ext: ""
@@ -69,6 +69,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
         with:
           targets: ${{ matrix.target }}
+
+      - name: Select newer Xcode for macOS
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for xcode in /Applications/Xcode_16.4.app /Applications/Xcode_16.3.app /Applications/Xcode_16.2.app /Applications/Xcode_16.1.app /Applications/Xcode_16.0.app; do
+            if [[ -d "$xcode" ]]; then
+              sudo xcode-select -s "$xcode/Contents/Developer"
+              break
+            fi
+          done
+          xcodebuild -version
 
       - name: Use hermetic Cargo home for Linux musl
         if: ${{ contains(matrix.target, 'unknown-linux-musl') }}

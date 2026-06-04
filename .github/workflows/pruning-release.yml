@@ -45,23 +45,18 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: zip
             ext: ".exe"
-          - name: windows-x86
-            runner: windows-latest
-            target: i686-pc-windows-msvc
-            archive: zip
-            ext: ".exe"
           - name: windows-arm64
             runner: windows-latest
             target: aarch64-pc-windows-msvc
             archive: zip
             ext: ".exe"
           - name: macos-x64
-            runner: macos-13
+            runner: macos-15-xlarge
             target: x86_64-apple-darwin
             archive: tar.gz
             ext: ""
           - name: macos-arm64
-            runner: macos-14
+            runner: macos-15-xlarge
             target: aarch64-apple-darwin
             archive: tar.gz
             ext: ""
@@ -228,9 +223,9 @@ jobs:
             printf '%s\n\n' '- 自动构建并上传多平台 `codex` CLI 二进制产物。'
             printf '%s\n\n' '## 构建产物'
             printf '%s\n' '- Linux：x64、arm64'
-            printf '%s\n' '- Windows：x64、x86、arm64'
+            printf '%s\n' '- Windows：x64、arm64'
             printf '%s\n\n' '- macOS：x64、arm64'
-            printf '%s\n\n' '说明：macOS 已不支持 32 位 x86 用户态程序，因此不提供 macOS x86 产物；Linux x86 受当前依赖链和交叉构建环境限制，本版暂不发布。'
+            printf '%s\n\n' '说明：macOS 已不支持 32 位 x86 用户态程序，因此不提供 macOS x86 产物；Linux x86 和 Windows x86 受当前 v8/native 依赖链限制，本版暂不发布。'
             printf '%s\n\n' '## 使用提示'
             printf '%s\n\n' '在配置中开启：'
             printf '%s\n' '```toml'

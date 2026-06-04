@@ -19,8 +19,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare-release:
+    name: Create or update Chinese release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Codex 工具输出相关性剪枝 ${TAG}"
+          {
+            printf '%s\n\n' '## 版本说明'
+            printf '%s\n\n' '这是 Codex 工具输出相关性剪枝的实验预发布版本，用于验证 `trim_prompt_context` 对长工具输出历史的后续上下文裁剪效果。'
+            printf '%s\n\n' '## 本版包含'
+            printf '%s\n' '- 新增可选配置 `[tool_output_relevance_pruning]`。'
+            printf '%s\n' '- 新增 `trim_prompt_context` 工具，用于把已经消费且后续不再需要的大型工具输出从提示词历史中剪掉。'
+            printf '%s\n' '- 工具输出压缩链路保持关闭，与本版本分离。'
+            printf '%s\n\n' '- 自动构建并上传多平台 `codex` CLI 二进制产物。'
+            printf '%s\n\n' '## 构建产物'
+            printf '%s\n' '- Linux：x64、arm64'
+            printf '%s\n' '- Windows：x64、arm64'
+            printf '%s\n\n' '- macOS：x64、arm64'
+            printf '%s\n\n' '说明：macOS 已不支持 32 位 x86 用户态程序，因此不提供 macOS x86 产物；Linux x86 和 Windows x86 受当前 v8/native 依赖链限制，本版暂不发布。'
+            printf '%s\n\n' '## 使用提示'
+            printf '%s\n\n' '在配置中开启：'
+            printf '%s\n' '```toml'
+            printf '%s\n' '[tool_output_relevance_pruning]'
+            printf '%s\n' 'enabled = true'
+            printf '%s\n' '```'
+          } > release-notes.md
+
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" \
+              --repo "${REPO}" \
+              --title "${title}" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            gh release create "${TAG}" \
+              --repo "${REPO}" \
+              --title "${title}" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
+
   build:
     name: Build ${{ matrix.name }}
+    needs: prepare-release
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
@@ -207,17 +256,7 @@ jobs:
           path: dist/codex-*
           if-no-files-found: error
 
-  publish:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Create or update release
+      - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -225,55 +264,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          title="Codex 工具输出相关性剪枝 ${TAG}"
-          {
-            printf '%s\n\n' '## 版本说明'
-            printf '%s\n\n' '这是 Codex 工具输出相关性剪枝的实验预发布版本，用于验证 `trim_prompt_context` 对长工具输出历史的后续上下文裁剪效果。'
-            printf '%s\n\n' '## 本版包含'
-            printf '%s\n' '- 新增可选配置 `[tool_output_relevance_pruning]`。'
-            printf '%s\n' '- 新增 `trim_prompt_context` 工具，用于把已经消费且后续不再需要的大型工具输出从提示词历史中剪掉。'
-            printf '%s\n' '- 工具输出压缩链路保持关闭，与本版本分离。'
-            printf '%s\n\n' '- 自动构建并上传多平台 `codex` CLI 二进制产物。'
-            printf '%s\n\n' '## 构建产物'
-            printf '%s\n' '- Linux：x64、arm64'
-            printf '%s\n' '- Windows：x64、arm64'
-            printf '%s\n\n' '- macOS：x64、arm64'
-            printf '%s\n\n' '说明：macOS 已不支持 32 位 x86 用户态程序，因此不提供 macOS x86 产物；Linux x86 和 Windows x86 受当前 v8/native 依赖链限制，本版暂不发布。'
-            printf '%s\n\n' '## 使用提示'
-            printf '%s\n\n' '在配置中开启：'
-            printf '%s\n' '```toml'
-            printf '%s\n' '[tool_output_relevance_pruning]'
-            printf '%s\n' 'enabled = true'
-            printf '%s\n' '```'
-          } > release-notes.md
+          dist_dir="${GITHUB_WORKSPACE}/dist"
+          mapfile -d '' assets < <(
+            find "${dist_dir}" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 | sort -z
+          )
 
-          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" \
-              --repo "${REPO}" \
-              --title "${title}" \
-              --notes-file release-notes.md \
-              --prerelease
-          else
-            gh release create "${TAG}" \
-              --repo "${REPO}" \
-              --title "${title}" \
-              --notes-file release-notes.md \
-              --prerelease
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release asset found in ${dist_dir}" >&2
+            exit 1
           fi
 
-      - name: Upload release assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -print0 \
-            | sort -z \
-            | xargs -0 sha256sum > dist/checksums.txt
+          checksum_file="${dist_dir}/checksums-${{ matrix.name }}.txt"
+          sha256sum "${assets[@]}" > "${checksum_file}"
+          assets+=("${checksum_file}")
 
-          gh release upload "${TAG}" dist/*.tar.gz dist/*.zip \
-            dist/checksums.txt \
+          gh release upload "${TAG}" "${assets[@]}" \
             --repo "${REPO}" \
             --clobber

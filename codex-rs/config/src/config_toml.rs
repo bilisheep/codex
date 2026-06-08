@@ -283,6 +283,10 @@ pub struct ConfigToml {
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
 
+    /// Optional compression pipeline for large tool outputs before they are
+    /// returned to the main model context.
+    pub tool_output_compression: Option<ToolOutputCompressionToml>,
+
     /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
     /// Default: `300000` (5 minutes).
     pub background_terminal_max_timeout: Option<u64>,
@@ -526,6 +530,18 @@ pub struct DebugConfigLockToml {
 
     /// Save fields resolved from the model catalog/session configuration.
     pub save_fields_resolved_from_model_catalog: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ToolOutputCompressionToml {
+    pub enabled: Option<bool>,
+    pub model: Option<String>,
+    pub apply_to: Option<Vec<String>>,
+    pub threshold_tokens: Option<usize>,
+    pub target_tokens: Option<usize>,
+    pub raw_store_max_bytes_per_output: Option<usize>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

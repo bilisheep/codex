@@ -31,6 +31,7 @@ use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
 use codex_config::config_toml::ThreadStoreToml;
+use codex_config::config_toml::ToolOutputCompressionToml;
 use codex_config::config_toml::validate_model_providers;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::project_trust_key;
@@ -193,6 +194,12 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usiz
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
+pub(crate) const DEFAULT_TOOL_OUTPUT_COMPRESSION_MODEL: &str = "gpt-5.4-mini";
+pub(crate) const DEFAULT_TOOL_OUTPUT_COMPRESSION_THRESHOLD_TOKENS: usize = 1200;
+pub(crate) const DEFAULT_TOOL_OUTPUT_COMPRESSION_TARGET_TOKENS: usize = 800;
+pub(crate) const DEFAULT_TOOL_OUTPUT_COMPRESSION_RAW_STORE_MAX_BYTES_PER_OUTPUT: usize =
+    1024 * 1024;
+pub(crate) const DEFAULT_TOOL_OUTPUT_COMPRESSION_TIMEOUT_MS: u64 = 8000;
 const DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT: &str = r#"You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
 
 At the start of your turn, you are the active agent.
@@ -578,6 +585,82 @@ pub enum ThreadStoreConfig {
     InMemory { id: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutputCompressionConfig {
+    pub enabled: bool,
+    pub model: String,
+    pub apply_to: Vec<String>,
+    pub threshold_tokens: usize,
+    pub target_tokens: usize,
+    pub raw_store_max_bytes_per_output: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for ToolOutputCompressionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: DEFAULT_TOOL_OUTPUT_COMPRESSION_MODEL.to_string(),
+            apply_to: vec!["exec_command".to_string()],
+            threshold_tokens: DEFAULT_TOOL_OUTPUT_COMPRESSION_THRESHOLD_TOKENS,
+            target_tokens: DEFAULT_TOOL_OUTPUT_COMPRESSION_TARGET_TOKENS,
+            raw_store_max_bytes_per_output:
+                DEFAULT_TOOL_OUTPUT_COMPRESSION_RAW_STORE_MAX_BYTES_PER_OUTPUT,
+            timeout_ms: DEFAULT_TOOL_OUTPUT_COMPRESSION_TIMEOUT_MS,
+        }
+    }
+}
+
+impl ToolOutputCompressionConfig {
+    fn from_toml(config: Option<ToolOutputCompressionToml>) -> Self {
+        let Some(config) = config else {
+            return Self::default();
+        };
+        let defaults = Self::default();
+        Self {
+            enabled: config.enabled.unwrap_or(defaults.enabled),
+            model: config
+                .model
+                .and_then(|model| {
+                    let trimmed = model.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                })
+                .unwrap_or(defaults.model),
+            apply_to: config
+                .apply_to
+                .map(|tools| {
+                    tools
+                        .into_iter()
+                        .filter_map(|tool| {
+                            let trimmed = tool.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|tools| !tools.is_empty())
+                .unwrap_or(defaults.apply_to),
+            threshold_tokens: config.threshold_tokens.unwrap_or(defaults.threshold_tokens),
+            target_tokens: config.target_tokens.unwrap_or(defaults.target_tokens),
+            raw_store_max_bytes_per_output: config
+                .raw_store_max_bytes_per_output
+                .unwrap_or(defaults.raw_store_max_bytes_per_output),
+            timeout_ms: config.timeout_ms.unwrap_or(defaults.timeout_ms),
+        }
+    }
+
+    pub fn applies_to(&self, tool_name: &str) -> bool {
+        self.apply_to.iter().any(|tool| tool == tool_name)
+    }
+}
+
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -826,6 +909,9 @@ pub struct Config {
 
     /// Token budget applied when storing tool/function outputs in the context manager.
     pub tool_output_token_limit: Option<usize>,
+
+    /// Optional pre-feedback compression for large tool outputs.
+    pub tool_output_compression: ToolOutputCompressionConfig,
 
     /// User-configured maximum number of agent threads that can be open concurrently.
     pub agent_max_threads: Option<usize>,
@@ -3178,6 +3264,8 @@ impl Config {
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
+        let tool_output_compression =
+            ToolOutputCompressionConfig::from_toml(cfg.tool_output_compression.clone());
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
             if let Some(ghost_snapshot) = cfg.ghost_snapshot.as_ref()
@@ -3509,6 +3597,7 @@ impl Config {
             })
             .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
+            tool_output_compression,
             agent_max_threads,
             agent_max_depth,
             agent_roles,

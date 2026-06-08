@@ -2693,6 +2693,44 @@
         }
       ]
     },
+    "ToolOutputCompressionToml": {
+      "additionalProperties": false,
+      "properties": {
+        "apply_to": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "raw_store_max_bytes_per_output": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "target_tokens": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threshold_tokens": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ToolSuggestConfig": {
       "additionalProperties": false,
       "properties": {
@@ -5184,6 +5222,14 @@
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
       "type": "boolean"
+    },
+    "tool_output_compression": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ToolOutputCompressionToml"
+        }
+      ],
+      "description": "Optional compression pipeline for large tool outputs before they are returned to the main model context."
     },
     "tool_output_token_limit": {
       "description": "Token budget applied when storing tool/function outputs in the context manager.",

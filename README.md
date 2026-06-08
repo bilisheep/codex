@@ -55,6 +55,40 @@ Each archive contains a single entry with the platform baked into the name (e.g.
 
 </details>
 
+### 本分支特性：工具输出前置预压缩
+
+这个分支是 `bilisheep/tool-output-pre-compression` 的策略分支，基于公共的 prompt/tool
+观测能力继续推进“工具输出回灌前预压缩”。目标是在大型工具输出进入主模型上下文之前，先由确定性抽取
+和小模型生成 evidence packet，从源头减少当前轮工具输出回灌 token。
+
+当前分支已从公共基础分支中独立出预压缩配置骨架，配置项如下：
+
+```toml
+[tool_output_compression]
+enabled = false
+model = "gpt-5.4-mini"
+apply_to = ["exec_command"]
+threshold_tokens = 1200
+target_tokens = 800
+raw_store_max_bytes_per_output = 1048576
+timeout_ms = 8000
+```
+
+参数含义：
+
+- `enabled`：是否开启工具输出前置预压缩，默认关闭。
+- `model`：用于生成 evidence packet 的小模型，默认 `gpt-5.4-mini`。
+- `apply_to`：允许预压缩的工具名，默认只面向 `exec_command`。
+- `threshold_tokens`：触发预压缩的大输出 token 门槛。
+- `target_tokens`：压缩后 evidence packet 的目标 token 大小。
+- `raw_store_max_bytes_per_output`：单条原始工具输出本地保留上限。
+- `timeout_ms`：小模型压缩链路超时时间。
+
+预期完整链路是：工具原始输出先进入本地 raw store；主模型默认只收到包含命令、退出码、路径行号、
+错误栈、测试失败、diff hunk、hash 和 `output_ref` 的 evidence packet；必要时再通过受限展开工具读取
+原始片段。这个分支不包含后置 `trim_prompt_context` 剪枝，那部分属于
+`bilisheep/tool-output-relevance-pruning`。
+
 ### Using Codex with your ChatGPT plan
 
 Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).

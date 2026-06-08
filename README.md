@@ -86,8 +86,7 @@ timeout_ms = 8000
 
 预期完整链路是：工具原始输出先进入本地 raw store；主模型默认只收到包含命令、退出码、路径行号、
 错误栈、测试失败、diff hunk、hash 和 `output_ref` 的 evidence packet；必要时再通过受限展开工具读取
-原始片段。这个分支不包含后置 `trim_prompt_context` 剪枝，那部分属于
-`bilisheep/tool-output-relevance-pruning`。
+原始片段。本分支只描述和配置工具输出前置预压缩能力。
 
 ### Using Codex with your ChatGPT plan
 

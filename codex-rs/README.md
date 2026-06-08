@@ -18,7 +18,5 @@ raw_store_max_bytes_per_output = 1048576
 timeout_ms = 8000
 ```
 
-This branch is separate from `tool_output_relevance_pruning` /
-`trim_prompt_context`; the post-consumption pruning strategy lives on its own
-branch. See the root [`README.md`](../README.md#本分支特性工具输出前置预压缩)
-for branch-specific notes.
+Only the pre-compression configuration is documented in this branch. See the
+root [`README.md`](../README.md#本分支特性工具输出前置预压缩) for details.

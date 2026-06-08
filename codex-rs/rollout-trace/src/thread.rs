@@ -9,6 +9,7 @@ use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +36,6 @@ use crate::TraceWriter;
 use crate::protocol_event::codex_turn_trace_event;
 use crate::protocol_event::tool_runtime_trace_event;
 use crate::protocol_event::wrapped_protocol_event_type;
-use serde_json::Value as JsonValue;
 
 /// Environment variable that enables local trace-bundle recording.
 ///

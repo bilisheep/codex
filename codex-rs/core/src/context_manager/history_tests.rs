@@ -1080,6 +1080,608 @@ fn record_items_respects_custom_token_limit() {
     );
 }
 
+#[test]
+fn relevance_pruning_rewrites_matching_function_output() {
+    let mut history = create_history_with_items(vec![
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-keep".to_string(),
+            output: FunctionCallOutputPayload::from_text("useful output".to_string()),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-prune".to_string(),
+            output: FunctionCallOutputPayload::from_text(
+                "output_ref: thread/turn/output-abc\nlarge irrelevant details".to_string(),
+            ),
+        },
+    ]);
+    let before_version = history.history_version();
+
+    let stats = history.apply_relevance_pruning_hints(&[RelevancePruningHint {
+        call_id: Some("call-prune".to_string()),
+        output_ref: Some("thread/turn/output-abc".to_string()),
+        replacement_text:
+            "Pruned tool output: not used by later reachability analysis. output_ref: thread/turn/output-abc"
+                .to_string(),
+    }]);
+
+    assert_eq!(
+        stats,
+        RelevancePruningStats {
+            matched_hints: 1,
+            rewritten_outputs: 1,
+            skipped_hints: 0,
+        }
+    );
+    assert_eq!(history.history_version(), before_version.saturating_add(1));
+    match &history.raw_items()[1] {
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            let content = output.text_content().unwrap_or_default();
+            assert!(content.contains("Pruned tool output"));
+            assert!(!content.contains("large irrelevant details"));
+        }
+        other => panic!("unexpected history item: {other:?}"),
+    }
+}
+
+#[test]
+fn relevance_pruning_can_match_by_output_ref_only() {
+    let mut history = create_history_with_items(vec![ResponseItem::FunctionCallOutput {
+        call_id: "call-unknown".to_string(),
+        output: FunctionCallOutputPayload::from_text(
+            "output_ref: thread/turn/output-xyz\nold text".to_string(),
+        ),
+    }]);
+
+    let stats = history.apply_relevance_pruning_hints(&[RelevancePruningHint {
+        call_id: None,
+        output_ref: Some("thread/turn/output-xyz".to_string()),
+        replacement_text: "Pruned by output_ref. output_ref: thread/turn/output-xyz".to_string(),
+    }]);
+
+    assert_eq!(stats.rewritten_outputs, 1);
+    match &history.raw_items()[0] {
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            assert_eq!(
+                output.text_content().unwrap_or_default(),
+                "Pruned by output_ref. output_ref: thread/turn/output-xyz"
+            );
+        }
+        other => panic!("unexpected history item: {other:?}"),
+    }
+}
+
+#[test]
+fn relevance_pruning_skips_non_text_outputs_and_unmatched_hints() {
+    let mut history = create_history_with_items(vec![ResponseItem::FunctionCallOutput {
+        call_id: "call-image".to_string(),
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::InputText {
+                text: "output_ref: thread/turn/image".to_string(),
+            },
+            FunctionCallOutputContentItem::InputImage {
+                image_url: "data:image/png;base64,abc".to_string(),
+                detail: None,
+            },
+        ]),
+    }]);
+    let before_version = history.history_version();
+
+    let stats = history.apply_relevance_pruning_hints(&[
+        RelevancePruningHint {
+            call_id: Some("missing-call".to_string()),
+            output_ref: None,
+            replacement_text: "unused".to_string(),
+        },
+        RelevancePruningHint {
+            call_id: Some("call-image".to_string()),
+            output_ref: Some("thread/turn/image".to_string()),
+            replacement_text: "would lose image content".to_string(),
+        },
+    ]);
+
+    assert_eq!(
+        stats,
+        RelevancePruningStats {
+            matched_hints: 0,
+            rewritten_outputs: 0,
+            skipped_hints: 2,
+        }
+    );
+    assert_eq!(history.history_version(), before_version);
+}
+
+#[test]
+fn relevance_pruning_plan_skips_consumed_packet_without_model_drop_feedback() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 20,
+        target_tokens: 160,
+        ..Default::default()
+    };
+    let large_packet = [
+        "Tool output was compressed before being returned to the main model.",
+        "output_ref: thread/turn/call-abc",
+        "command: rg -n \"doThing\" src",
+        "cwd: /repo",
+        "exit_code: 0",
+        "raw_sha256: abcdef123456",
+        "must_preserve_evidence:",
+        "- src/main.rs:40: function_candidate(doThing): fn doThing(input: String) {",
+        "- src/main.rs:43: danger_sql_candidate: statement.execute(input);",
+        "line_index_evidence:",
+        "- src/main.rs:42: fn doThing(input: String) {",
+        "- src/main.rs:43: dangerous(input);",
+        "schema_evidence:",
+        "- patched_function: doThing",
+        "summary:",
+        "This sentence is intentionally repeated to make the packet exceed the pruning threshold.",
+        "This sentence is intentionally repeated to make the packet exceed the pruning threshold.",
+        "This sentence is intentionally repeated to make the packet exceed the pruning threshold.",
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: "call-1".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload::from_text(large_packet),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::default();
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert!(plan.is_empty());
+}
+
+#[test]
+fn relevance_pruning_plan_skips_raw_exec_output_without_model_drop_feedback() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 40,
+        target_tokens: 160,
+        ..Default::default()
+    };
+    let raw_output = [
+        "Chunk ID: abc123",
+        "Wall time: 0.1234 seconds",
+        "Process exited with code 0",
+        "Original token count: 1200",
+        "Output:",
+        "src/Marten/Linq/SqlGeneration/Filters/FullTextWhereFragment.cs:62: public string get_Sql() => _sql;",
+        "src/Marten/Linq/SqlGeneration/Filters/FullTextWhereFragment.cs:64: public void Apply(CommandBuilder builder) {",
+        "src/Marten/Linq/SqlGeneration/Filters/FullTextWhereFragment.cs:66: builder.AppendWithParameters(_sql);",
+        &"low signal repeated line ".repeat(500),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"get_Sql|Apply\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-raw".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-raw".to_string(),
+            output: FunctionCallOutputPayload::from_text(raw_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::default();
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert!(plan.is_empty());
+}
+
+#[test]
+fn relevance_pruning_honors_model_drop_feedback() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 10_000,
+        target_tokens: 140,
+        ..Default::default()
+    };
+    let raw_output = [
+        "Chunk ID: abc123",
+        "Wall time: 0.1234 seconds",
+        "Process exited with code 0",
+        "Original token count: 1200",
+        "Output:",
+        "src/noise.rs:10: fn unrelated() {}",
+        &"unneeded output ".repeat(500),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"unrelated\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-drop".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-drop".to_string(),
+            output: FunctionCallOutputPayload::from_text(raw_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        ["call-drop".to_string()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert_eq!(plan.hints.len(), 1);
+    let replacement = &plan.hints[0].replacement_text;
+    assert!(replacement.contains("trim_prompt_context marked this consumed output as not needed"));
+    assert!(replacement.contains("call_id: call-drop"));
+    assert!(replacement.contains("command: rg -n"));
+    assert!(!replacement.contains("src/noise.rs:10"));
+    assert!(plan.stats.original_token_estimate > plan.stats.replacement_token_estimate);
+}
+
+#[test]
+fn relevance_pruning_honors_model_drop_feedback_by_chunk_id() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 10_000,
+        target_tokens: 140,
+        ..Default::default()
+    };
+    let raw_output = [
+        "Chunk ID: abc123",
+        "Wall time: 0.1234 seconds",
+        "Process exited with code 0",
+        "Original token count: 1200",
+        "Output:",
+        "src/noise.rs:10: fn unrelated() {}",
+        &"unneeded output ".repeat(500),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"unrelated\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-drop".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-drop".to_string(),
+            output: FunctionCallOutputPayload::from_text(raw_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        ["abc123".to_string()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert_eq!(plan.hints.len(), 1);
+    assert_eq!(plan.hints[0].call_id.as_deref(), Some("call-drop"));
+    assert!(plan.stats.original_token_estimate > plan.stats.replacement_token_estimate);
+}
+
+#[test]
+fn relevance_pruning_keep_chunk_id_overrides_drop_feedback() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 10_000,
+        target_tokens: 140,
+        ..Default::default()
+    };
+    let raw_output = [
+        "Chunk ID: keep123",
+        "Wall time: 0.0100 seconds",
+        "Process exited with code 0",
+        "Output:",
+        "src/useful.rs:10: fn useful() {}",
+        &"useful output ".repeat(500),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"useful\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-keep".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-keep".to_string(),
+            output: FunctionCallOutputPayload::from_text(raw_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        ["call-keep".to_string()],
+        ["keep123".to_string()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert!(plan.is_empty());
+}
+
+#[test]
+fn relevance_pruning_honors_model_drop_command_feedback() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 10_000,
+        target_tokens: 140,
+        ..Default::default()
+    };
+    let raw_output = [
+        "Wall time: 0.0200 seconds",
+        "Process exited with code 0",
+        "Output:",
+        "src/history.rs:10: unrelated context",
+        &"old diff output ".repeat(500),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"git show --stat deadbeef","workdir":"/repo"}"#.to_string(),
+            call_id: "call-by-command".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-by-command".to_string(),
+            output: FunctionCallOutputPayload::from_text(raw_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+        ["git show --stat".to_string()],
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert_eq!(plan.hints.len(), 1);
+    let replacement = &plan.hints[0].replacement_text;
+    assert!(replacement.contains("trim_prompt_context marked this consumed output as not needed"));
+    assert!(replacement.contains("call_id: call-by-command"));
+    assert!(replacement.contains("command: git show --stat deadbeef"));
+    assert!(!replacement.contains("old diff output"));
+}
+
+#[test]
+fn relevance_pruning_keep_feedback_overrides_drop_feedback() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 10_000,
+        target_tokens: 140,
+        ..Default::default()
+    };
+    let raw_output = [
+        "Wall time: 0.0100 seconds",
+        "Process exited with code 0",
+        "Output:",
+        "src/useful.rs:10: fn useful() {}",
+        &"useful output ".repeat(500),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"useful\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-keep".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-keep".to_string(),
+            output: FunctionCallOutputPayload::from_text(raw_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        ["call-keep".to_string()],
+        ["call-keep".to_string()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert!(plan.is_empty());
+}
+
+#[test]
+fn relevance_pruning_keep_only_prunes_large_unkept_outputs() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 80,
+        target_tokens: 60,
+        ..Default::default()
+    };
+    let useful_output = [
+        "Chunk ID: keep123",
+        "Wall time: 0.0100 seconds",
+        "Process exited with code 0",
+        "Output:",
+        "src/useful.rs:10: fn useful() {}",
+        &"useful evidence ".repeat(200),
+    ]
+    .join("\n");
+    let noise_output = [
+        "Chunk ID: drop123",
+        "Wall time: 0.0100 seconds",
+        "Process exited with code 0",
+        "Output:",
+        "src/noise.rs:10: fn noise() {}",
+        &"already consumed noise ".repeat(200),
+    ]
+    .join("\n");
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"useful\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-keep".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-keep".to_string(),
+            output: FunctionCallOutputPayload::from_text(useful_output),
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"noise\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-drop".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-drop".to_string(),
+            output: FunctionCallOutputPayload::from_text(noise_output),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        Vec::<String>::new(),
+        ["keep123".to_string()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert_eq!(plan.hints.len(), 1);
+    assert_eq!(plan.hints[0].call_id.as_deref(), Some("call-drop"));
+    assert!(
+        plan.hints[0]
+            .replacement_text
+            .contains("call_id: call-drop")
+    );
+    assert!(!plan.hints[0].replacement_text.contains("src/noise.rs:10"));
+    assert!(plan.stats.original_token_estimate > plan.stats.replacement_token_estimate);
+}
+
+#[test]
+fn relevance_pruning_keep_only_skips_small_unkept_outputs() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 200,
+        target_tokens: 60,
+        ..Default::default()
+    };
+    let prompt_items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"useful\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-keep".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-keep".to_string(),
+            output: FunctionCallOutputPayload::from_text(
+                "Chunk ID: keep123\nWall time: 0.0100 seconds\nOutput:\nuseful".to_string(),
+            ),
+        },
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "exec_command".to_string(),
+            namespace: None,
+            arguments: r#"{"cmd":"rg -n \"noise\" src","workdir":"/repo"}"#.to_string(),
+            call_id: "call-small".to_string(),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-small".to_string(),
+            output: FunctionCallOutputPayload::from_text(
+                "Chunk ID: small123\nWall time: 0.0100 seconds\nOutput:\nsmall".to_string(),
+            ),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::from_tool_args(
+        Vec::<String>::new(),
+        ["keep123".to_string()],
+        Vec::<String>::new(),
+        Vec::<String>::new(),
+    );
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert!(plan.is_empty());
+}
+
+#[test]
+fn relevance_pruning_rewrites_raw_exec_output_by_call_id_without_output_ref() {
+    let raw_output = [
+        "Wall time: 0.0100 seconds",
+        "Process exited with code 0",
+        "Output:",
+        "src/foo.rs:10: fn useful() {}",
+        &"unneeded ".repeat(300),
+    ]
+    .join("\n");
+    let mut history = create_history_with_items(vec![ResponseItem::FunctionCallOutput {
+        call_id: "call-raw".to_string(),
+        output: FunctionCallOutputPayload::from_text(raw_output),
+    }]);
+
+    let stats = history.apply_relevance_pruning_hints(&[RelevancePruningHint {
+        call_id: Some("call-raw".to_string()),
+        output_ref: None,
+        replacement_text: "Pruned tool output: raw exec output\ncall_id: call-raw\nretained_evidence:\n- src/foo.rs:10: fn useful() {}".to_string(),
+    }]);
+
+    assert_eq!(stats.rewritten_outputs, 1);
+    match &history.raw_items()[0] {
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            let content = output.text_content().unwrap_or_default();
+            assert!(content.contains("Pruned tool output"));
+            assert!(content.contains("src/foo.rs:10"));
+            assert!(!content.contains("unneeded"));
+        }
+        other => panic!("unexpected history item: {other:?}"),
+    }
+}
+
+#[test]
+fn relevance_pruning_plan_skips_small_or_unreferenced_outputs() {
+    let config = crate::config::ToolOutputRelevancePruningConfig {
+        enabled: true,
+        threshold_tokens: 200,
+        target_tokens: 80,
+        ..Default::default()
+    };
+    let prompt_items = vec![
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-small".to_string(),
+            output: FunctionCallOutputPayload::from_text(
+                "output_ref: thread/turn/small\ncommand: rg foo".to_string(),
+            ),
+        },
+        ResponseItem::FunctionCallOutput {
+            call_id: "call-no-ref".to_string(),
+            output: FunctionCallOutputPayload::from_text(
+                "command: rg foo\nlarge text without ref ".repeat(80),
+            ),
+        },
+    ];
+
+    let feedback = RelevancePruningFeedback::default();
+    let plan = build_relevance_pruning_plan_for_feedback(&prompt_items, &config, &feedback);
+
+    assert!(plan.is_empty());
+}
+
 fn assert_truncated_message_matches(message: &str, line: &str, expected_removed: usize) {
     let pattern = truncated_message_pattern(line);
     let regex = Regex::new(&pattern).unwrap_or_else(|err| {

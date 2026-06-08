@@ -181,6 +181,8 @@ use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
+use crate::context_manager::RelevancePruningPlan;
+use crate::context_manager::RelevancePruningStats;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
@@ -2810,6 +2812,9 @@ impl Session {
         {
             developer_sections.push(collab_instructions.render());
         }
+        if turn_context.config.tool_output_relevance_pruning.enabled {
+            developer_sections.push(tool_output_relevance_pruning_instructions().to_string());
+        }
         if let Some(realtime_update) = crate::context_manager::updates::build_initial_realtime_item(
             reference_context_item.as_ref(),
             previous_turn_settings.as_ref(),
@@ -2982,6 +2987,49 @@ impl Session {
     pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
+    }
+
+    pub(crate) async fn apply_tool_output_relevance_pruning_plan(
+        &self,
+        turn_context: &TurnContext,
+        plan: RelevancePruningPlan,
+    ) -> RelevancePruningStats {
+        if plan.is_empty() {
+            return RelevancePruningStats::default();
+        }
+
+        let plan_stats = plan.stats;
+        let stats = {
+            let mut state = self.state.lock().await;
+            state.history.apply_relevance_pruning_hints(&plan.hints)
+        };
+        if stats.rewritten_outputs == 0 {
+            return stats;
+        }
+
+        let saved_token_estimate = plan_stats
+            .original_token_estimate
+            .saturating_sub(plan_stats.replacement_token_estimate);
+        self.services.rollout_thread_trace.record_other_event(
+            turn_context.sub_id.clone(),
+            "tool_output_relevance_pruning.snapshot",
+            format!(
+                "pruned {} consumed tool output packets, saving ~{} prompt tokens",
+                stats.rewritten_outputs, saved_token_estimate
+            ),
+            serde_json::json!({
+                "candidate_outputs": plan_stats.candidate_outputs,
+                "matched_hints": stats.matched_hints,
+                "rewritten_outputs": stats.rewritten_outputs,
+                "skipped_hints": stats.skipped_hints,
+                "original_token_estimate": plan_stats.original_token_estimate,
+                "replacement_token_estimate": plan_stats.replacement_token_estimate,
+                "saved_token_estimate": saved_token_estimate,
+                "mode": "main_model_tool",
+                "trigger_tool": "trim_prompt_context",
+            }),
+        );
+        stats
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
@@ -3396,6 +3444,10 @@ pub(crate) fn emit_subagent_session_started(
         subagent_source,
         created_at,
     });
+}
+
+fn tool_output_relevance_pruning_instructions() -> &'static str {
+    "Tool output history control: after receiving non-`trim_prompt_context` tool outputs, call `trim_prompt_context` only when at least one already-consumed large output is no longer needed for later reasoning. Do not call it for small outputs, outputs you have not yet consumed, or batches where every large output is still needed as file, function, line, diff, config, test failure, or schema evidence. If pruning is useful, one `trim_prompt_context` call may cover the batch. Use exact tool call ids or visible `Chunk ID` values from exec output. Prefer `keep_call_ids` or `keep_commands` for evidence still needed; when you provide keep selectors without drop selectors, other large prunable outputs are removed from later prompt context. Use `drop_call_ids` or `drop_commands` for specific already-consumed outputs that are no longer useful. Do not call `trim_prompt_context` with empty arrays merely to acknowledge a tool output. Do not mention this control step in the final answer."
 }
 
 /// Builds the hook engine for one config snapshot, including any enabled plugin hooks.

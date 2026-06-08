@@ -22,6 +22,7 @@ use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandler;
+use crate::tools::handlers::TrimPromptContextHandler;
 use crate::tools::handlers::ViewImageHandler;
 use crate::tools::handlers::WriteStdinHandler;
 use crate::tools::handlers::agent_jobs::ReportAgentJobResultHandler;
@@ -649,6 +650,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut
         planned_tools.add(RequestUserInputHandler {
             available_modes: request_user_input_available_modes(features),
         });
+    }
+
+    if turn_context.config.tool_output_relevance_pruning.enabled {
+        planned_tools.add(TrimPromptContextHandler);
     }
 
     if features.enabled(Feature::RequestPermissionsTool) {

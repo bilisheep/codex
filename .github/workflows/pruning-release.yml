@@ -1,0 +1,308 @@
+name: pruning-release
+
+on:
+  push:
+    tags:
+      - "v*tool-output-relevance-pruning*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to update"
+        required: true
+        default: "v0.1.0-tool-output-relevance-pruning"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pruning-release-${{ github.ref_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    name: Create or update Chinese release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Codex 工具输出相关性剪枝 ${TAG}"
+          {
+            printf '%s\n\n' '## 版本说明'
+            printf '%s\n\n' '这是 Codex 工具输出相关性剪枝的实验预发布版本，用于验证 `trim_prompt_context` 对长工具输出历史的后续上下文裁剪效果。'
+            printf '%s\n\n' '## 本版包含'
+            printf '%s\n' '- 新增可选配置 `[tool_output_relevance_pruning]`。'
+            printf '%s\n' '- 新增 `trim_prompt_context` 工具，用于把已经消费且后续不再需要的大型工具输出从提示词历史中剪掉。'
+            printf '%s\n' '- 工具输出压缩链路保持关闭，与本版本分离。'
+            printf '%s\n\n' '- 自动构建并上传多平台 `codex` CLI 二进制产物。'
+            printf '%s\n\n' '## 构建产物'
+            printf '%s\n' '- Linux：x64、arm64'
+            printf '%s\n' '- Windows：x64、arm64'
+            printf '%s\n\n' '- macOS：arm64'
+            printf '%s\n\n' '说明：本版不发布 macOS x64；macOS 已不支持 32 位 x86 用户态程序，因此也不提供 macOS x86 产物；Linux x86 和 Windows x86 受当前 v8/native 依赖链限制，本版暂不发布。'
+            printf '%s\n\n' '## 使用提示'
+            printf '%s\n\n' '最小配置，在 `~/.codex/config.toml` 中开启：'
+            printf '%s\n' '```toml'
+            printf '%s\n' '[tool_output_relevance_pruning]'
+            printf '%s\n' 'enabled = true'
+            printf '%s\n\n' '```'
+            printf '%s\n\n' '完整配置示例：'
+            printf '%s\n' '```toml'
+            printf '%s\n' '[tool_output_relevance_pruning]'
+            printf '%s\n' 'enabled = true'
+            printf '%s\n' 'apply_to = ["exec_command"]'
+            printf '%s\n' 'threshold_tokens = 200'
+            printf '%s\n' 'target_tokens = 140'
+            printf '%s\n' 'timeout_ms = 8000'
+            printf '%s\n' '# 当前实现不调用小模型；model 字段仅作为兼容保留字段，通常无需配置。'
+            printf '%s\n' '# model = "gpt-5.4-mini"'
+            printf '%s\n\n' '```'
+            printf '%s\n\n' '参数说明：'
+            printf '%s\n' '- `enabled`：是否开启工具输出相关性剪枝，默认 `false`。'
+            printf '%s\n' '- `apply_to`：允许剪枝的工具名白名单，默认 `["exec_command"]`；本版主要面向 shell / unified exec 的长输出。'
+            printf '%s\n' '- `threshold_tokens`：大输出候选门槛的配置字段，默认 `200`；当前版本仍以主模型通过 `trim_prompt_context` 给出的 keep/drop selector 作为实际剪枝依据。'
+            printf '%s\n' '- `target_tokens`：剪枝后占位记录的目标大小，默认 `140`；占位记录会保留工具名、call id、命令、cwd 和剪枝来源等必要定位信息。'
+            printf '%s\n' '- `timeout_ms`：为后续异步/子模型剪枝链路保留的超时字段，默认 `8000`；当前主模型剪枝路径通常无需调整。'
+            printf '%s\n\n' '- `model`：兼容保留字段；当前方案已经抛弃小模型，不会因为配置该字段而调用 mini 模型。'
+            printf '%s\n\n' '生效边界：该机制节省的是后续模型请求中的历史上下文 token，不会减少当前轮首次接收工具输出的 token。短任务或小输出任务收益有限；长时间仓库分析、漏洞可达性分析、反复执行 `rg` / `sed` / `git show` / 测试命令的任务更适合开启。'
+          } > release-notes.md
+
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" \
+              --repo "${REPO}" \
+              --title "${title}" \
+              --notes-file release-notes.md \
+              --prerelease
+          else
+            gh release create "${TAG}" \
+              --repo "${REPO}" \
+              --title "${title}" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare-release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+            ext: ""
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: tar.gz
+            ext: ""
+          - name: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+            ext: ".exe"
+          - name: windows-arm64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            archive: zip
+            ext: ".exe"
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+            ext: ""
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Select newer Xcode for macOS
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for xcode in /Applications/Xcode_16.4.app /Applications/Xcode_16.3.app /Applications/Xcode_16.2.app /Applications/Xcode_16.1.app /Applications/Xcode_16.0.app; do
+            if [[ -d "$xcode" ]]; then
+              sudo xcode-select -s "$xcode/Contents/Developer"
+              break
+            fi
+          done
+          xcodebuild -version
+
+      - name: Use hermetic Cargo home for Linux musl
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig for Linux musl builds
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install Linux musl build tools
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Install UBSan runtime for Linux musl
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libubsan1
+
+      - name: Configure rustc UBSan wrapper for Linux musl
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ubsan=""
+          if command -v ldconfig >/dev/null 2>&1; then
+            ubsan="$(ldconfig -p | grep -m1 'libubsan\.so\.1' | sed -E 's/.*=> (.*)$/\1/')"
+          fi
+          wrapper_root="${RUNNER_TEMP:-/tmp}"
+          wrapper="${wrapper_root}/rustc-ubsan-wrapper"
+          cat > "${wrapper}" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ -n "${ubsan}" ]]; then
+            export LD_PRELOAD="${ubsan}\${LD_PRELOAD:+:\${LD_PRELOAD}}"
+          fi
+          exec "\$1" "\${@:2}"
+          EOF
+          chmod +x "${wrapper}"
+          echo "RUSTC_WRAPPER=${wrapper}" >> "$GITHUB_ENV"
+          echo "RUSTC_WORKSPACE_WRAPPER=" >> "$GITHUB_ENV"
+
+      - name: Configure musl rusty_v8 artifacts
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        uses: ./.github/actions/setup-rusty-v8-musl
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Configure Linux release environment
+        if: ${{ contains(matrix.target, 'unknown-linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_LTO=thin" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_ENCODED_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "RUSTDOCFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+
+      - name: Build codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --target "${{ matrix.target }}" --bin codex
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}"
+          package="codex-${tag}-${{ matrix.name }}"
+          dist="${GITHUB_WORKSPACE}/dist/${package}"
+          mkdir -p "${dist}"
+
+          cp "target/${{ matrix.target }}/release/codex${{ matrix.ext }}" "${dist}/codex${{ matrix.ext }}"
+          "${dist}/codex${{ matrix.ext }}" --version > "${dist}/VERSION.txt" || true
+          {
+            printf '%s\n\n' 'Codex 工具输出相关性剪枝实验版'
+            printf 'Tag: %s\n' "${tag}"
+            printf 'Target: %s\n' '${{ matrix.target }}'
+            printf 'Platform: %s\n\n' '${{ matrix.name }}'
+            printf '%s\n' '功能开关:'
+            printf '%s\n' '[tool_output_relevance_pruning]'
+            printf '%s\n\n' 'enabled = true'
+            printf '%s\n' '作用:'
+            printf '%s\n' '开启后 Codex 会暴露 trim_prompt_context 工具，让主模型在读完大型工具输出后标记后续不再需要的输出。'
+            printf '%s\n\n' '被标记的历史工具输出会替换成短占位记录，用于减少后续轮次反复带入上下文的 token；它不会减少当前轮首次接收工具输出的 token。'
+            printf '%s\n' '可选参数:'
+            printf '%s\n' 'apply_to = ["exec_command"]        # 默认只处理 exec_command'
+            printf '%s\n' 'threshold_tokens = 200            # 大输出候选门槛字段，实际剪枝由 trim_prompt_context 的 keep/drop selector 决定'
+            printf '%s\n' 'target_tokens = 140               # 剪枝后占位记录目标大小'
+            printf '%s\n' 'timeout_ms = 8000                 # 兼容保留超时字段，当前主模型剪枝路径通常无需调整'
+            printf '%s\n\n' '# model 为兼容保留字段；当前方案不调用小模型。'
+            printf '%s\n' '说明:'
+            printf '%s\n' '这是剪枝分支的自动构建产物，只包含 codex CLI 主二进制。'
+          } > "${dist}/README.txt"
+
+          cd "${GITHUB_WORKSPACE}/dist"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            7z a "${package}.zip" "${package}"
+          else
+            tar -czf "${package}.tar.gz" "${package}"
+          fi
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-${{ matrix.name }}
+          path: dist/codex-*
+          if-no-files-found: error
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist_dir="${GITHUB_WORKSPACE}/dist"
+          assets_file="${RUNNER_TEMP:-/tmp}/release-assets-${{ matrix.name }}.txt"
+          find "${dist_dir}" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
+            | sort > "${assets_file}"
+
+          if [[ ! -s "${assets_file}" ]]; then
+            echo "No release asset found in ${dist_dir}" >&2
+            exit 1
+          fi
+
+          checksum_file="${dist_dir}/checksums-${{ matrix.name }}.txt"
+          xargs sha256sum < "${assets_file}" > "${checksum_file}"
+
+          xargs gh release upload "${TAG}" \
+            --repo "${REPO}" \
+            --clobber \
+            < <(printf '%s\n' "${checksum_file}"; cat "${assets_file}")

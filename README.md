@@ -78,7 +78,7 @@ Each archive contains a `codex` executable plus a short release README. This bra
 enabled = true
 ```
 
-长时间批处理、仓库审计或漏洞可达性分析建议先使用下面这组保守配置：
+长时间批处理、仓库审计或漏洞可达性分析建议使用下面这组保守配置：
 
 ```toml
 [tool_output_relevance_pruning]
@@ -93,16 +93,11 @@ target_tokens = 140
 
 #### 配置参数
 
-完整配置项如下：
-
 ```toml
 [tool_output_relevance_pruning]
-enabled = false
-model = "gpt-5.4-mini"
+enabled = true
 apply_to = ["exec_command"]
-threshold_tokens = 200
 target_tokens = 140
-timeout_ms = 8000
 ```
 
 | 参数 | 默认值 | 当前含义 |
@@ -110,9 +105,6 @@ timeout_ms = 8000
 | `enabled` | `false` | 是否开启工具输出相关性剪枝。关闭时不会暴露 `trim_prompt_context`，行为等同原版 Codex。 |
 | `apply_to` | `["exec_command"]` | 允许被剪枝的工具名。当前分支主要面向 shell / unified exec 输出，建议保持默认。 |
 | `target_tokens` | `140` | 剪枝后占位记录的目标大小。当前实现会生成很短的追溯占位，不建议为了追求更详细占位而调大。 |
-| `threshold_tokens` | `200` | 兼容保留字段。当前版本不按该值自动扫描并剪枝，实际剪枝由 `trim_prompt_context` 的 keep/drop selector 触发。 |
-| `model` | `"gpt-5.4-mini"` | 兼容保留字段。当前策略不调用小模型，剪枝判断由主模型完成。 |
-| `timeout_ms` | `8000` | 兼容保留字段。当前主模型工具剪枝路径没有额外小模型调用超时。 |
 
 #### `trim_prompt_context` 如何工作
 

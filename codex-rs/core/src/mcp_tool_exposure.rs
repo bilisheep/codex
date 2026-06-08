@@ -34,7 +34,8 @@ pub(crate) fn build_mcp_tool_exposure(
         && (config
             .features
             .enabled(Feature::ToolSearchAlwaysDeferMcpTools)
-            || deferred_tools.len() >= DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD);
+            || config.mcp_direct_tool_exposure_threshold == 0
+            || deferred_tools.len() >= config.mcp_direct_tool_exposure_threshold);
 
     if !should_defer {
         return McpToolExposure {

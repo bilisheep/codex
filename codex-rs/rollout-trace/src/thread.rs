@@ -35,6 +35,7 @@ use crate::TraceWriter;
 use crate::protocol_event::codex_turn_trace_event;
 use crate::protocol_event::tool_runtime_trace_event;
 use crate::protocol_event::wrapped_protocol_event_type;
+use serde_json::Value as JsonValue;
 
 /// Environment variable that enables local trace-bundle recording.
 ///
@@ -245,6 +246,29 @@ impl ThreadTraceContext {
             return;
         };
         context.append_with_context_best_effort(codex_turn_id.into(), payload);
+    }
+
+    /// Emits a compact structured instrumentation event before a dedicated
+    /// trace variant exists for the event kind.
+    pub fn record_other_event(
+        &self,
+        codex_turn_id: impl Into<CodexTurnId>,
+        kind: impl Into<String>,
+        summary: impl Into<String>,
+        metadata: JsonValue,
+    ) {
+        let ThreadTraceContextState::Enabled(context) = &self.state else {
+            return;
+        };
+        context.append_with_context_best_effort(
+            codex_turn_id.into(),
+            RawTraceEventPayload::Other {
+                kind: kind.into(),
+                summary: summary.into(),
+                payloads: Vec::new(),
+                metadata,
+            },
+        );
     }
 
     /// Emits the v2 child-to-parent completion message as an explicit graph edge.

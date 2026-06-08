@@ -622,6 +622,14 @@ pub struct ToolsToml {
     )]
     pub web_search: Option<WebSearchToolConfig>,
     pub experimental_request_user_input: Option<ExperimentalRequestUserInput>,
+
+    /// Enable the `view_image` tool that lets the agent attach local images.
+    #[serde(default)]
+    pub view_image: Option<bool>,
+
+    /// Maximum effective MCP tools to expose directly before using `tool_search`.
+    /// Set to `0` to always defer non-explicit MCP tools when `tool_search` is available.
+    pub mcp_direct_tool_exposure_threshold: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]

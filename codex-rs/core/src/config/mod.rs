@@ -790,6 +790,10 @@ pub struct Config {
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: Constrained<HashMap<String, McpServerConfig>>,
 
+    /// Maximum effective MCP tools to expose directly before using `tool_search`.
+    /// `0` means always defer non-explicit MCP tools when `tool_search` is available.
+    pub mcp_direct_tool_exposure_threshold: usize,
+
     /// Preferred store for MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
     ///          Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
@@ -2312,6 +2316,14 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
     }
 }
 
+fn resolve_mcp_direct_tool_exposure_threshold(config_toml: &ConfigToml) -> usize {
+    config_toml
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.mcp_direct_tool_exposure_threshold)
+        .unwrap_or(crate::mcp_tool_exposure::DIRECT_MCP_TOOL_EXPOSURE_THRESHOLD)
+}
+
 fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config {
     let base = multi_agent_v2_toml_config(config_toml.features.as_ref());
     let default = MultiAgentV2Config::default();
@@ -3037,6 +3049,8 @@ impl Config {
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
         let code_mode = resolve_code_mode_config(&cfg);
+        let mcp_direct_tool_exposure_threshold =
+            resolve_mcp_direct_tool_exposure_threshold(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
         let apps_mcp_path_override = if features.enabled(Feature::AppsMcpPathOverride) {
             let base = apps_mcp_path_override_toml_config(cfg.features.as_ref());
@@ -3164,7 +3178,6 @@ impl Config {
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
             .max(MIN_EMPTY_YIELD_TIME_MS);
-
         let ghost_snapshot = {
             let mut config = GhostSnapshotConfig::default();
             if let Some(ghost_snapshot) = cfg.ghost_snapshot.as_ref()
@@ -3471,6 +3484,7 @@ impl Config {
                 env!("CARGO_PKG_VERSION"),
             ),
             mcp_servers,
+            mcp_direct_tool_exposure_threshold,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
             mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
@@ -3492,8 +3506,8 @@ impl Config {
                     } else {
                         Some(trimmed.to_string())
                     }
-                })
-                .collect(),
+            })
+            .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
             agent_max_threads,
             agent_max_depth,

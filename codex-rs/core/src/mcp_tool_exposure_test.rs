@@ -105,6 +105,29 @@ async fn directly_exposes_small_effective_tool_sets() {
 }
 
 #[tokio::test]
+async fn threshold_zero_defers_small_effective_tool_sets() {
+    let mut config = test_config().await;
+    config.mcp_direct_tool_exposure_threshold = 0;
+    let mcp_tools = numbered_mcp_tools(1);
+
+    let exposure = build_mcp_tool_exposure(
+        &mcp_tools,
+        /*connectors*/ None,
+        &config,
+        /*search_tool_enabled*/ true,
+    );
+
+    assert!(exposure.direct_tools.is_empty());
+    assert_eq!(
+        exposure
+            .deferred_tools
+            .as_ref()
+            .map(|tools| tool_names(tools)),
+        Some(tool_names(&mcp_tools))
+    );
+}
+
+#[tokio::test]
 async fn excludes_tools_hidden_from_model_exposure() {
     let config = test_config().await;
     let visible_tool = make_mcp_tool(

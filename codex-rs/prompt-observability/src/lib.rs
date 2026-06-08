@@ -1,0 +1,30 @@
+mod analyze;
+mod report;
+mod snapshot;
+
+pub use analyze::analyze_trace_path;
+pub use report::AnalysisFormat;
+pub use report::ChainCoverageSummary;
+pub use report::DeferredSearchSummary;
+pub use report::SegmentSummary;
+pub use report::TokenWaterfallRow;
+pub use report::ToolSummary;
+pub use report::TraceAnalysisReport;
+pub use report::render_analysis_report;
+pub use snapshot::ChainCoverageTrace;
+pub use snapshot::ChainStatus;
+pub use snapshot::EvidenceStrength;
+pub use snapshot::OptimizationAction;
+pub use snapshot::OptimizationFinding;
+pub use snapshot::PromptCriticality;
+pub use snapshot::PromptObservabilitySnapshot;
+pub use snapshot::PromptSegmentTrace;
+pub use snapshot::PromptSnapshotInput;
+pub use snapshot::ToolExposure;
+pub use snapshot::ToolExposureTrace;
+pub use snapshot::build_prompt_observability_snapshot;
+pub use snapshot::estimate_json_tokens;
+pub use snapshot::stable_hash;
+pub use snapshot::utility_score;
+
+pub const PROMPT_OBSERVABILITY_SNAPSHOT_EVENT_KIND: &str = "prompt_observability.snapshot";

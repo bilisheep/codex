@@ -471,9 +471,7 @@ impl TraceReducer {
                     carried_payload,
                 })?;
             }
-            RawTraceEventPayload::Other { .. } => {
-                bail!("raw trace event has no reducer implementation");
-            }
+            RawTraceEventPayload::Other { .. } => {}
         }
 
         Ok(())

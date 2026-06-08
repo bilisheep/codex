@@ -26,6 +26,7 @@ use crate::raw_event::RawTraceEventPayload;
 use crate::writer::TraceWriter;
 
 const INFERENCE_CALL_ID_HEADER: &str = "x-codex-inference-call-id";
+const PROMPT_OBSERVABILITY_SNAPSHOT_EVENT_KIND: &str = "prompt_observability.snapshot";
 
 /// Turn-local inference tracing context.
 ///
@@ -142,11 +143,33 @@ impl InferenceTraceAttempt {
         }
     }
 
-    fn inference_call_id(&self) -> Option<&str> {
+    pub fn is_enabled(&self) -> bool {
+        matches!(self.state, InferenceTraceAttemptState::Enabled(_))
+    }
+
+    pub fn inference_call_id(&self) -> Option<&str> {
         match &self.state {
             InferenceTraceAttemptState::Disabled => None,
             InferenceTraceAttemptState::Enabled(attempt) => {
                 Some(attempt.inference_call_id.as_str())
+            }
+        }
+    }
+
+    pub fn thread_id(&self) -> Option<&str> {
+        match &self.state {
+            InferenceTraceAttemptState::Disabled => None,
+            InferenceTraceAttemptState::Enabled(attempt) => {
+                Some(attempt.context.thread_id.as_str())
+            }
+        }
+    }
+
+    pub fn codex_turn_id(&self) -> Option<&str> {
+        match &self.state {
+            InferenceTraceAttemptState::Disabled => None,
+            InferenceTraceAttemptState::Enabled(attempt) => {
+                Some(attempt.context.codex_turn_id.as_str())
             }
         }
     }
@@ -192,6 +215,35 @@ impl InferenceTraceAttempt {
                 model: attempt.context.model.clone(),
                 provider_name: attempt.context.provider_name.clone(),
                 request_payload,
+            },
+        );
+    }
+
+    /// Records a compact local-only prompt/tool observability snapshot.
+    ///
+    /// This intentionally uses the generic `Other` raw event envelope so the
+    /// hot trace schema does not need a dedicated reducer model before the
+    /// analyzer has stabilized.
+    pub fn record_prompt_observability_snapshot(&self, snapshot: &impl Serialize) {
+        let InferenceTraceAttemptState::Enabled(attempt) = &self.state else {
+            return;
+        };
+        let Some(snapshot_payload) = write_json_payload_best_effort(
+            &attempt.context.writer,
+            RawPayloadKind::PromptObservability,
+            snapshot,
+        ) else {
+            return;
+        };
+        append_with_context_best_effort(
+            &attempt.context,
+            RawTraceEventPayload::Other {
+                kind: PROMPT_OBSERVABILITY_SNAPSHOT_EVENT_KIND.to_string(),
+                summary: "prompt/tool observability snapshot".to_string(),
+                payloads: vec![snapshot_payload],
+                metadata: serde_json::json!({
+                    "inference_call_id": attempt.inference_call_id.as_str(),
+                }),
             },
         );
     }
@@ -490,6 +542,52 @@ mod tests {
         assert_eq!(inference.upstream_request_id, Some("req-1".to_string()));
         assert_eq!(rollout.raw_payloads.len(), 2);
 
+        Ok(())
+    }
+
+    #[test]
+    fn prompt_observability_snapshot_payload_replays_as_raw_payload() -> anyhow::Result<()> {
+        let temp = TempDir::new()?;
+        let writer = Arc::new(TraceWriter::create(
+            temp.path(),
+            "trace-1".to_string(),
+            "rollout-1".to_string(),
+            "thread-root".to_string(),
+        )?);
+        writer.append(RawTraceEventPayload::ThreadStarted {
+            thread_id: "thread-root".to_string(),
+            agent_path: "/root".to_string(),
+            metadata_payload: None,
+        })?;
+        writer.append(RawTraceEventPayload::CodexTurnStarted {
+            codex_turn_id: "turn-1".to_string(),
+            thread_id: "thread-root".to_string(),
+        })?;
+        let context = InferenceTraceContext::enabled(
+            writer,
+            "thread-root".to_string(),
+            "turn-1".to_string(),
+            "gpt-test".to_string(),
+            "test-provider".to_string(),
+        );
+
+        let attempt = context.start_attempt();
+        attempt.record_prompt_observability_snapshot(&json!({
+            "schema_version": 1,
+            "model": "gpt-test",
+        }));
+
+        let rollout = replay_bundle(temp.path())?;
+
+        assert_eq!(rollout.raw_payloads.len(), 1);
+        assert_eq!(
+            rollout
+                .raw_payloads
+                .values()
+                .next()
+                .map(|payload| payload.kind.clone()),
+            Some(RawPayloadKind::PromptObservability)
+        );
         Ok(())
     }
 

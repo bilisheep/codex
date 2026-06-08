@@ -2324,6 +2324,7 @@ dependencies = [
  "codex-model-provider",
  "codex-models-manager",
  "codex-plugin",
+ "codex-prompt-observability",
  "codex-protocol",
  "codex-responses-api-proxy",
  "codex-rmcp-client",
@@ -2610,6 +2611,7 @@ dependencies = [
  "codex-network-proxy",
  "codex-otel",
  "codex-plugin",
+ "codex-prompt-observability",
  "codex-prompts",
  "codex-protocol",
  "codex-response-debug-context",
@@ -2665,6 +2667,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha1 0.10.6",
+ "sha2 0.10.9",
  "shlex",
  "similar",
  "tempfile",
@@ -3520,6 +3523,19 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "pretty_assertions",
+]
+
+[[package]]
+name = "codex-prompt-observability"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "codex-utils-string",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "tempfile",
 ]
 
 [[package]]

@@ -46,4 +46,6 @@ pub enum RawPayloadKind {
     SessionMetadata,
     /// Runtime notification payload carried when a child agent reports back to its parent.
     AgentResult,
+    /// Compact prompt/tool observability snapshot for local cost attribution.
+    PromptObservability,
 }

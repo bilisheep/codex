@@ -80,6 +80,9 @@ use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_prompt_observability::AnalysisFormat;
+use codex_prompt_observability::analyze_trace_path;
+use codex_prompt_observability::render_analysis_report;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::user_input::UserInput;
 use codex_terminal_detection::TerminalName;
@@ -232,6 +235,9 @@ enum DebugSubcommand {
     #[clap(hide = true)]
     TraceReduce(DebugTraceReduceCommand),
 
+    /// Analyze prompt/tool observability snapshots in a rollout trace bundle.
+    TraceAnalyze(DebugTraceAnalyzeCommand),
+
     /// Internal: reset local memory state for a fresh start.
     #[clap(hide = true)]
     ClearMemories,
@@ -299,6 +305,36 @@ struct DebugTraceReduceCommand {
     /// Output path for reduced RolloutTrace JSON. Defaults to TRACE_BUNDLE/state.json.
     #[arg(long = "output", short = 'o', value_name = "FILE")]
     output: Option<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugTraceAnalyzeCommand {
+    /// Trace bundle directory or root containing trace-* bundle directories.
+    #[arg(value_name = "TRACE_BUNDLE_OR_ROOT")]
+    trace_bundle_or_root: PathBuf,
+
+    /// Output file path. Defaults to ~/.codex/debug/trace-analysis/<bundle-name>.<format>.
+    #[arg(long = "output", short = 'o', value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    /// Output format.
+    #[arg(long = "format", value_enum, default_value_t = DebugTraceAnalyzeFormat::Markdown)]
+    format: DebugTraceAnalyzeFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DebugTraceAnalyzeFormat {
+    Markdown,
+    Json,
+}
+
+impl From<DebugTraceAnalyzeFormat> for AnalysisFormat {
+    fn from(value: DebugTraceAnalyzeFormat) -> Self {
+        match value {
+            DebugTraceAnalyzeFormat::Markdown => AnalysisFormat::Markdown,
+            DebugTraceAnalyzeFormat::Json => AnalysisFormat::Json,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -1462,6 +1498,14 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 )?;
                 run_debug_trace_reduce_command(cmd).await?;
             }
+            DebugSubcommand::TraceAnalyze(cmd) => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug trace-analyze",
+                )?;
+                run_debug_trace_analyze_command(cmd).await?;
+            }
             DebugSubcommand::ClearMemories => {
                 reject_remote_mode_for_subcommand(
                     root_remote.as_deref(),
@@ -1830,6 +1874,52 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
     println!("{}", output.display());
 
     Ok(())
+}
+
+async fn run_debug_trace_analyze_command(cmd: DebugTraceAnalyzeCommand) -> anyhow::Result<()> {
+    let report = analyze_trace_path(&cmd.trace_bundle_or_root)?;
+    let rendered = render_analysis_report(&report, cmd.format.into());
+    let output = match cmd.output {
+        Some(output) => output,
+        None => default_trace_analysis_output_path(&cmd.trace_bundle_or_root, cmd.format)?,
+    };
+    if let Some(parent) = output.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(&output, rendered).await?;
+    println!("{}", output.display());
+    Ok(())
+}
+
+fn default_trace_analysis_output_path(
+    trace_bundle_or_root: &std::path::Path,
+    format: DebugTraceAnalyzeFormat,
+) -> anyhow::Result<PathBuf> {
+    let codex_home = find_codex_home()?;
+    Ok(trace_analysis_output_path(
+        &codex_home,
+        trace_bundle_or_root,
+        format,
+    ))
+}
+
+fn trace_analysis_output_path(
+    codex_home: &std::path::Path,
+    trace_bundle_or_root: &std::path::Path,
+    format: DebugTraceAnalyzeFormat,
+) -> PathBuf {
+    let format_suffix = match format {
+        DebugTraceAnalyzeFormat::Markdown => "md",
+        DebugTraceAnalyzeFormat::Json => "json",
+    };
+    let bundle_name = trace_bundle_or_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("trace-analysis");
+    codex_home
+        .join("debug")
+        .join("trace-analysis")
+        .join(format!("{bundle_name}.{format_suffix}"))
 }
 
 async fn run_debug_prompt_input_command(
@@ -2724,6 +2814,51 @@ mod tests {
         };
 
         assert!(cmd.bundled);
+    }
+
+    #[test]
+    fn debug_trace_analyze_parses_format() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "trace-analyze",
+            "/tmp/trace-root",
+            "--format",
+            "json",
+            "--output",
+            "/tmp/trace-report.json",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand: DebugSubcommand::TraceAnalyze(cmd),
+        })) = cli.subcommand
+        else {
+            panic!("expected debug trace-analyze subcommand");
+        };
+
+        assert_eq!(cmd.trace_bundle_or_root, PathBuf::from("/tmp/trace-root"));
+        assert_eq!(cmd.format, DebugTraceAnalyzeFormat::Json);
+        assert_eq!(cmd.output, Some(PathBuf::from("/tmp/trace-report.json")));
+    }
+
+    #[test]
+    fn debug_trace_analyze_default_output_path_uses_codex_home() {
+        let codex_home = tempfile::tempdir().expect("temp codex home");
+        let output = trace_analysis_output_path(
+            codex_home.path(),
+            std::path::Path::new("/tmp/trace-root"),
+            DebugTraceAnalyzeFormat::Json,
+        );
+
+        assert_eq!(
+            output,
+            codex_home
+                .path()
+                .join("debug")
+                .join("trace-analysis")
+                .join("trace-root.json")
+        );
     }
 
     #[test]

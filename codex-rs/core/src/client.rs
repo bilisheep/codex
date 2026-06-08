@@ -71,6 +71,9 @@ use codex_login::default_client::build_reqwest_client;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 
+use codex_prompt_observability::PromptObservabilitySnapshot;
+use codex_prompt_observability::PromptSnapshotInput;
+use codex_prompt_observability::build_prompt_observability_snapshot;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -810,6 +813,32 @@ impl ModelClient {
         Ok(request)
     }
 
+    fn build_prompt_observability_snapshot(
+        &self,
+        prompt: &Prompt,
+        request: &ResponsesApiRequest,
+        inference_trace_attempt: &InferenceTraceAttempt,
+    ) -> PromptObservabilitySnapshot {
+        let input_json = request
+            .input
+            .iter()
+            .filter_map(|item| serde_json::to_value(item).ok())
+            .collect::<Vec<_>>();
+        build_prompt_observability_snapshot(PromptSnapshotInput {
+            thread_id: inference_trace_attempt.thread_id(),
+            turn_id: inference_trace_attempt.codex_turn_id(),
+            inference_call_id: inference_trace_attempt.inference_call_id(),
+            model: request.model.as_str(),
+            base_instructions: request.instructions.as_str(),
+            input_json: input_json.as_slice(),
+            tools_json: request.tools.as_slice(),
+            output_schema_json: prompt.output_schema.as_ref(),
+            output_schema_present: prompt.output_schema.is_some(),
+            output_schema_strict: prompt.output_schema_strict,
+            parallel_tool_calls: request.parallel_tool_calls,
+        })
+    }
+
     /// Returns whether the Responses-over-WebSocket transport is active for this session.
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
@@ -1298,6 +1327,16 @@ impl ModelClientSession {
             )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
+            if inference_trace_attempt.is_enabled() {
+                let prompt_observability_snapshot =
+                    self.client.build_prompt_observability_snapshot(
+                        prompt,
+                        &request,
+                        &inference_trace_attempt,
+                    );
+                inference_trace_attempt
+                    .record_prompt_observability_snapshot(&prompt_observability_snapshot);
+            }
             inference_trace_attempt.record_started(&request);
             let client = ApiResponsesClient::new(
                 transport,
@@ -1459,8 +1498,6 @@ impl ModelClientSession {
                 Err(err) => return Err(map_api_error(err)),
             }
 
-            let (mut ws_request, previous_response_id_from_untraced_warmup) =
-                self.prepare_websocket_request(ws_payload, &request);
             let inference_trace_attempt = if warmup {
                 // Prewarm sends `generate=false`; it is connection setup, not a
                 // model inference attempt that should appear in rollout traces.
@@ -1468,6 +1505,18 @@ impl ModelClientSession {
             } else {
                 inference_trace.start_attempt()
             };
+            if !warmup && inference_trace_attempt.is_enabled() {
+                let prompt_observability_snapshot =
+                    self.client.build_prompt_observability_snapshot(
+                        prompt,
+                        &request,
+                        &inference_trace_attempt,
+                    );
+                inference_trace_attempt
+                    .record_prompt_observability_snapshot(&prompt_observability_snapshot);
+            }
+            let (mut ws_request, previous_response_id_from_untraced_warmup) =
+                self.prepare_websocket_request(ws_payload, &request);
             stamp_ws_stream_request_start_ms(&mut ws_request);
             if previous_response_id_from_untraced_warmup {
                 // The transport can reuse an untraced warmup response id and omit the
